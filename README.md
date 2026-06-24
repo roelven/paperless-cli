@@ -13,11 +13,11 @@ A minimal bash CLI for [Paperless-ngx](https://docs.paperless-ngx.com/) designed
 Copy the example config and fill in your values:
 
 ```bash
-cp .env.example ~/.paperless
-$EDITOR ~/.paperless
+cp .env.example .env
+$EDITOR .env
 ```
 
-The script sources `~/.paperless` on every run. You can override the config path with `PAPERLESS_CONFIG=/path/to/file`. Environment variables always take precedence over the config file.
+The script sources a `.env` file in the same directory on every run. Environment variables always take precedence over the `.env` file.
 
 Get your API token from the Paperless-ngx web UI under **Settings → My Account**, or via:
 
