@@ -103,26 +103,30 @@ resolve_results() {
 # --- Commands ---
 
 cmd_search() {
-  local opt_q="" opt_t="" opt_s="" opt_tag="" opt_limit="$DEFAULT_LIMIT" opt_all=0
+  local opt_q="" opt_t="" opt_s="" opt_tag="" opt_after="" opt_before="" opt_limit="$DEFAULT_LIMIT" opt_all=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      -q)      shift; opt_q="$1" ;;
-      -t)      shift; opt_t="$1" ;;
-      -s)      shift; opt_s="$1" ;;
-      --tag)   shift; opt_tag="$1" ;;
-      --limit) shift; opt_limit="$1" ;;
-      --all)   opt_all=1 ;;
-      *)       echo "Unknown option: $1" >&2; exit 1 ;;
+      -q)       shift; opt_q="$1" ;;
+      -t)       shift; opt_t="$1" ;;
+      -s)       shift; opt_s="$1" ;;
+      --tag)    shift; opt_tag="$1" ;;
+      --after)  shift; opt_after="$1" ;;
+      --before) shift; opt_before="$1" ;;
+      --limit)  shift; opt_limit="$1" ;;
+      --all)    opt_all=1 ;;
+      *)        echo "Unknown option: $1" >&2; exit 1 ;;
     esac
     shift
   done
 
   local params=""
-  [ -n "$opt_q"   ] && params="${params}&query=$(url_encode "$opt_q")"
-  [ -n "$opt_t"   ] && params="${params}&title__icontains=$(url_encode "$opt_t")"
-  [ -n "$opt_s"   ] && params="${params}&correspondent__name__icontains=$(url_encode "$opt_s")"
-  [ -n "$opt_tag" ] && params="${params}&tags__name__in=$(url_encode "$opt_tag")"
+  [ -n "$opt_q"      ] && params="${params}&query=$(url_encode "$opt_q")"
+  [ -n "$opt_t"      ] && params="${params}&title__icontains=$(url_encode "$opt_t")"
+  [ -n "$opt_s"      ] && params="${params}&correspondent__name__icontains=$(url_encode "$opt_s")"
+  [ -n "$opt_tag"    ] && params="${params}&tags__name__in=$(url_encode "$opt_tag")"
+  [ -n "$opt_after"  ] && params="${params}&created__date__gte=$(url_encode "$opt_after")"
+  [ -n "$opt_before" ] && params="${params}&created__date__lte=$(url_encode "$opt_before")"
   params="${params#&}"
 
   local tag_map corr_map
