@@ -82,13 +82,17 @@ fetch_map() {
 
 fetch_tag_map()           { fetch_map "tags/?page_size=10000"; }
 fetch_correspondent_map() { fetch_map "correspondents/?page_size=10000"; }
+fetch_doctype_map()       { fetch_map "document_types/?page_size=10000"; }
 
-# Resolve a results array: replace tag/correspondent IDs with names
+# Resolve a results array: replace tag/correspondent/document_type IDs with names
 resolve_results() {
   local results="$1" tag_map="$2" corr_map="$3" include_content="${4:-false}"
+  local doctype_map="${5:-}"
+  [ -z "$doctype_map" ] && doctype_map="{}"
   echo "$results" | jq \
     --argjson tm "$tag_map" \
     --argjson cm "$corr_map" \
+    --argjson dm "$doctype_map" \
     --argjson inc "$include_content" \
     '[.[] | {
       id,
@@ -96,6 +100,7 @@ resolve_results() {
       created,
       original_file_name,
       correspondent_name: ($cm[(.correspondent|tostring)] // null),
+      document_type: ($dm[(.document_type|tostring)] // null),
       tag_names: [.tags[] | ($tm[(.|tostring)] // ("id:"+tostring))]
     } + (if $inc then {content: .content, page_count: .page_count, archived_file_name: .archived_file_name} else {} end)]'
 }
@@ -103,7 +108,7 @@ resolve_results() {
 # --- Commands ---
 
 cmd_search() {
-  local opt_q="" opt_t="" opt_s="" opt_tag="" opt_after="" opt_before="" opt_limit="$DEFAULT_LIMIT" opt_all=0
+  local opt_q="" opt_t="" opt_s="" opt_tag="" opt_type="" opt_after="" opt_before="" opt_limit="$DEFAULT_LIMIT" opt_all=0
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -111,6 +116,7 @@ cmd_search() {
       -t)       shift; opt_t="$1" ;;
       -s)       shift; opt_s="$1" ;;
       --tag)    shift; opt_tag="$1" ;;
+      --type)   shift; opt_type="$1" ;;
       --after)  shift; opt_after="$1" ;;
       --before) shift; opt_before="$1" ;;
       --limit)  shift; opt_limit="$1" ;;
@@ -125,13 +131,15 @@ cmd_search() {
   [ -n "$opt_t"      ] && params="${params}&title__icontains=$(url_encode "$opt_t")"
   [ -n "$opt_s"      ] && params="${params}&correspondent__name__icontains=$(url_encode "$opt_s")"
   [ -n "$opt_tag"    ] && params="${params}&tags__name__in=$(url_encode "$opt_tag")"
+  [ -n "$opt_type"   ] && params="${params}&document_type__name__icontains=$(url_encode "$opt_type")"
   [ -n "$opt_after"  ] && params="${params}&created__date__gte=$(url_encode "$opt_after")"
   [ -n "$opt_before" ] && params="${params}&created__date__lte=$(url_encode "$opt_before")"
   params="${params#&}"
 
-  local tag_map corr_map
+  local tag_map corr_map doctype_map
   tag_map=$(fetch_tag_map)
   corr_map=$(fetch_correspondent_map)
+  doctype_map=$(fetch_doctype_map)
 
   local all_results="[]" total_count=0
 
@@ -160,7 +168,7 @@ cmd_search() {
   fi
 
   local resolved truncated
-  resolved=$(resolve_results "$all_results" "$tag_map" "$corr_map" false)
+  resolved=$(resolve_results "$all_results" "$tag_map" "$corr_map" false "$doctype_map")
   returned=$(echo "$resolved" | jq 'length')
   if [ "$total_count" -gt "$returned" ]; then
     truncated="true"
@@ -173,11 +181,12 @@ cmd_search() {
 
 cmd_get() {
   local id="$1"
-  local doc tag_map corr_map
+  local doc tag_map corr_map doctype_map
   doc=$(api_get "documents/${id}/")
   tag_map=$(fetch_tag_map)
   corr_map=$(fetch_correspondent_map)
-  resolve_results "[${doc}]" "$tag_map" "$corr_map" true | jq '.[0]'
+  doctype_map=$(fetch_doctype_map)
+  resolve_results "[${doc}]" "$tag_map" "$corr_map" true "$doctype_map" | jq '.[0]'
 }
 
 cmd_content() {
