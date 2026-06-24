@@ -12,7 +12,7 @@ PAPERLESS_TOKEN="${PAPERLESS_TOKEN:-}"
 
 [ -z "$PAPERLESS_HOST" ]  && { echo "Error: PAPERLESS_HOST is not set (set it in ~/.paperless or via env)" >&2; exit 1; }
 [ -z "$PAPERLESS_TOKEN" ] && { echo "Error: PAPERLESS_TOKEN is not set (set it in ~/.paperless or via env)" >&2; exit 1; }
-DEFAULT_LIMIT=25
+DEFAULT_LIMIT=100
 
 for _dep in curl jq; do
   command -v "$_dep" >/dev/null || { echo "Error: $_dep is required" >&2; exit 1; }
@@ -129,13 +129,14 @@ cmd_search() {
   tag_map=$(fetch_tag_map)
   corr_map=$(fetch_correspondent_map)
 
-  local all_results="[]"
+  local all_results="[]" total_count=0
 
   if [ "$opt_all" -eq 1 ]; then
     local current_url="${PAPERLESS_HOST%/}/api/documents/?${params}${params:+&}page_size=100"
     while [ -n "$current_url" ]; do
       local resp page_results
       resp=$(api_get_url "$current_url")
+      [ "$total_count" -eq 0 ] && total_count=$(echo "$resp" | jq '.count')
       page_results=$(echo "$resp" | jq '.results')
       all_results=$(printf '%s\n%s' "$all_results" "$page_results" | jq -s 'add')
       current_url=$(echo "$resp" | jq -r '.next // empty')
@@ -145,10 +146,25 @@ cmd_search() {
     [ -n "$params" ] && query_string="${params}&${query_string}"
     local resp
     resp=$(api_get "documents/?${query_string}")
+    total_count=$(echo "$resp" | jq '.count')
     all_results=$(echo "$resp" | jq '.results')
+    local returned
+    returned=$(echo "$all_results" | jq 'length')
+    if [ "$total_count" -gt "$returned" ]; then
+      echo "# Showing ${returned} of ${total_count} — use --all to fetch everything" >&2
+    fi
   fi
 
-  resolve_results "$all_results" "$tag_map" "$corr_map" false
+  local resolved truncated
+  resolved=$(resolve_results "$all_results" "$tag_map" "$corr_map" false)
+  returned=$(echo "$resolved" | jq 'length')
+  if [ "$total_count" -gt "$returned" ]; then
+    truncated="true"
+  else
+    truncated="false"
+  fi
+  jq -n --argjson results "$resolved" --argjson count "$total_count" --argjson trunc "$truncated" \
+    '{count: $count, truncated: $trunc, results: $results}'
 }
 
 cmd_get() {
