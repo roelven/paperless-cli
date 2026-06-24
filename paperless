@@ -1,11 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
+_config="${PAPERLESS_CONFIG:-$HOME/.paperless}"
+# shellcheck source=/dev/null
+[ -f "$_config" ] && . "$_config"
+
 PAPERLESS_HOST="${PAPERLESS_HOST:-}"
 PAPERLESS_TOKEN="${PAPERLESS_TOKEN:-}"
 
-[ -z "$PAPERLESS_HOST" ]  && { echo "Error: PAPERLESS_HOST is not set" >&2; exit 1; }
-[ -z "$PAPERLESS_TOKEN" ] && { echo "Error: PAPERLESS_TOKEN is not set" >&2; exit 1; }
+[ -z "$PAPERLESS_HOST" ]  && { echo "Error: PAPERLESS_HOST is not set (set it in ~/.paperless or via env)" >&2; exit 1; }
+[ -z "$PAPERLESS_TOKEN" ] && { echo "Error: PAPERLESS_TOKEN is not set (set it in ~/.paperless or via env)" >&2; exit 1; }
 DEFAULT_LIMIT=25
 
 for _dep in curl jq; do

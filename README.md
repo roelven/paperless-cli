@@ -10,10 +10,14 @@ A minimal bash CLI for [Paperless-ngx](https://docs.paperless-ngx.com/) designed
 
 ## Setup
 
+Copy the example config and fill in your values:
+
 ```bash
-export PAPERLESS_HOST=https://your-paperless-instance
-export PAPERLESS_TOKEN=your-api-token
+cp .env.example ~/.paperless
+$EDITOR ~/.paperless
 ```
+
+The script sources `~/.paperless` on every run. You can override the config path with `PAPERLESS_CONFIG=/path/to/file`. Environment variables always take precedence over the config file.
 
 Get your API token from the Paperless-ngx web UI under **Settings → My Account**, or via:
 
