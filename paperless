@@ -1,0 +1,334 @@
+#!/bin/bash
+set -euo pipefail
+
+PAPERLESS_HOST="${PAPERLESS_HOST:-}"
+PAPERLESS_TOKEN="${PAPERLESS_TOKEN:-}"
+
+[ -z "$PAPERLESS_HOST" ]  && { echo "Error: PAPERLESS_HOST is not set" >&2; exit 1; }
+[ -z "$PAPERLESS_TOKEN" ] && { echo "Error: PAPERLESS_TOKEN is not set" >&2; exit 1; }
+DEFAULT_LIMIT=25
+
+for _dep in curl jq; do
+  command -v "$_dep" >/dev/null || { echo "Error: $_dep is required" >&2; exit 1; }
+done
+
+# --- API helpers ---
+
+api_request() {
+  local method="$1" url="$2" body="${3:-}"
+  local tmpfile status resp
+  tmpfile=$(mktemp /tmp/paperless_XXXXXX)
+  local curl_args=(-s -w "%{http_code}" -o "$tmpfile"
+    -H "Authorization: Token ${PAPERLESS_TOKEN}")
+  [ "$method" != "GET" ] && curl_args+=(-X "$method")
+  [ -n "$body" ] && curl_args+=(-H "Content-Type: application/json" -d "$body")
+  status=$(curl "${curl_args[@]}" "$url")
+  resp=$(cat "$tmpfile")
+  rm -f "$tmpfile"
+  if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+    echo "Error: HTTP $status" >&2
+    [ -n "$resp" ] && echo "$resp" >&2
+    exit 1
+  fi
+  echo "$resp"
+}
+
+api_get()     { api_request GET "${PAPERLESS_HOST%/}/api/$1"; }
+api_get_url() { api_request GET "$1"; }
+api_post()    { api_request POST  "${PAPERLESS_HOST%/}/api/$1" "$2"; }
+api_patch()   { api_request PATCH "${PAPERLESS_HOST%/}/api/$1" "$2"; }
+
+api_get_raw() {
+  local path="$1" outfile="$2"
+  local status
+  status=$(curl -s -w "%{http_code}" -o "$outfile" \
+    -H "Authorization: Token ${PAPERLESS_TOKEN}" \
+    "${PAPERLESS_HOST%/}/api/$path")
+  if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+    rm -f "$outfile"
+    echo "Error: HTTP $status" >&2
+    exit 1
+  fi
+}
+
+url_encode() { printf "%s" "$1" | jq -Rr @uri; }
+
+# --- Resolution helpers (bash 3.2 safe — no declare -A) ---
+
+fetch_map() {
+  local endpoint="$1"
+  local tmpfile status resp
+  tmpfile=$(mktemp /tmp/paperless_XXXXXX)
+  status=$(curl -s -w "%{http_code}" -o "$tmpfile" \
+    -H "Authorization: Token ${PAPERLESS_TOKEN}" \
+    "${PAPERLESS_HOST%/}/api/$endpoint")
+  resp=$(cat "$tmpfile"); rm -f "$tmpfile"
+  if [ "$status" -eq 403 ]; then
+    echo "{}"
+    return
+  fi
+  if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+    echo "Error: HTTP $status fetching $endpoint" >&2
+    exit 1
+  fi
+  echo "$resp" | jq '.results | map({key:(.id|tostring), value:.name}) | from_entries'
+}
+
+fetch_tag_map()           { fetch_map "tags/?page_size=10000"; }
+fetch_correspondent_map() { fetch_map "correspondents/?page_size=10000"; }
+
+# Resolve a results array: replace tag/correspondent IDs with names
+resolve_results() {
+  local results="$1" tag_map="$2" corr_map="$3" include_content="${4:-false}"
+  echo "$results" | jq \
+    --argjson tm "$tag_map" \
+    --argjson cm "$corr_map" \
+    --argjson inc "$include_content" \
+    '[.[] | {
+      id,
+      title,
+      created,
+      original_file_name,
+      correspondent_name: ($cm[(.correspondent|tostring)] // null),
+      tag_names: [.tags[] | ($tm[(.|tostring)] // ("id:"+tostring))]
+    } + (if $inc then {content: .content, page_count: .page_count, archived_file_name: .archived_file_name} else {} end)]'
+}
+
+# --- Commands ---
+
+cmd_search() {
+  local opt_q="" opt_t="" opt_s="" opt_tag="" opt_limit="$DEFAULT_LIMIT" opt_all=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -q)      shift; opt_q="$1" ;;
+      -t)      shift; opt_t="$1" ;;
+      -s)      shift; opt_s="$1" ;;
+      --tag)   shift; opt_tag="$1" ;;
+      --limit) shift; opt_limit="$1" ;;
+      --all)   opt_all=1 ;;
+      *)       echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+    shift
+  done
+
+  local params=""
+  [ -n "$opt_q"   ] && params="${params}&query=$(url_encode "$opt_q")"
+  [ -n "$opt_t"   ] && params="${params}&title__icontains=$(url_encode "$opt_t")"
+  [ -n "$opt_s"   ] && params="${params}&correspondent__name__icontains=$(url_encode "$opt_s")"
+  [ -n "$opt_tag" ] && params="${params}&tags__name__in=$(url_encode "$opt_tag")"
+  params="${params#&}"
+
+  local tag_map corr_map
+  tag_map=$(fetch_tag_map)
+  corr_map=$(fetch_correspondent_map)
+
+  local all_results="[]"
+
+  if [ "$opt_all" -eq 1 ]; then
+    local current_url="${PAPERLESS_HOST%/}/api/documents/?${params}${params:+&}page_size=100"
+    while [ -n "$current_url" ]; do
+      local resp page_results
+      resp=$(api_get_url "$current_url")
+      page_results=$(echo "$resp" | jq '.results')
+      all_results=$(printf '%s\n%s' "$all_results" "$page_results" | jq -s 'add')
+      current_url=$(echo "$resp" | jq -r '.next // empty')
+    done
+  else
+    local query_string="page_size=${opt_limit}"
+    [ -n "$params" ] && query_string="${params}&${query_string}"
+    local resp
+    resp=$(api_get "documents/?${query_string}")
+    all_results=$(echo "$resp" | jq '.results')
+  fi
+
+  resolve_results "$all_results" "$tag_map" "$corr_map" false
+}
+
+cmd_get() {
+  local id="$1"
+  local doc tag_map corr_map
+  doc=$(api_get "documents/${id}/")
+  tag_map=$(fetch_tag_map)
+  corr_map=$(fetch_correspondent_map)
+  resolve_results "[${doc}]" "$tag_map" "$corr_map" true | jq '.[0]'
+}
+
+cmd_content() {
+  api_get "documents/$1/" | jq -r '.content'
+}
+
+cmd_download() {
+  local id="" outpath="" use_original=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --output)   shift; outpath="$1" ;;
+      --original) use_original=1 ;;
+      -*)         echo "Unknown option: $1" >&2; exit 1 ;;
+      *)          id="$1" ;;
+    esac
+    shift
+  done
+
+  [ -z "$id" ] && { echo "Error: document ID required" >&2; exit 1; }
+
+  if [ -z "$outpath" ]; then
+    local title
+    title=$(api_get "documents/${id}/" | jq -r '.title')
+    local safe_title
+    safe_title=$(printf "%s" "$title" | sed 's/[^A-Za-z0-9._-]/_/g')
+    outpath="./${safe_title}.pdf"
+  fi
+
+  local endpoint="documents/${id}/download/"
+  [ "$use_original" -eq 1 ] && endpoint="${endpoint}?original=true"
+
+  api_get_raw "$endpoint" "$outpath"
+  jq -n --arg path "$outpath" '{"saved_to": $path}'
+}
+
+cmd_tags_list() {
+  api_get "tags/?page_size=10000" | jq '[.results[] | {id, name, slug}]'
+}
+
+cmd_tags_add() {
+  local doc_id="$1" tag_name="$2"
+  local tags_json tag_id
+
+  tags_json=$(api_get "tags/?page_size=10000")
+  tag_id=$(echo "$tags_json" | jq -r --arg n "$tag_name" \
+    '.results[] | select(.name == $n) | .id' | head -1)
+
+  if [ -z "$tag_id" ]; then
+    local tag_name_json
+    tag_name_json=$(printf "%s" "$tag_name" | jq -R .)
+    tag_id=$(api_post "tags/" "{\"name\": ${tag_name_json}}" | jq -r '.id')
+    echo "Created tag '${tag_name}' (id: ${tag_id})" >&2
+  fi
+
+  local current_tags new_tags
+  current_tags=$(api_get "documents/${doc_id}/" | jq '.tags')
+  new_tags=$(echo "$current_tags" | jq --argjson tid "$tag_id" '. + [$tid] | unique')
+
+  api_patch "documents/${doc_id}/" "{\"tags\": ${new_tags}}" >/dev/null
+  jq -n --arg doc "$doc_id" --arg tag "$tag_name" \
+    '{"success": true, "document_id": ($doc|tonumber), "tag_added": $tag}'
+}
+
+cmd_tags_remove() {
+  local doc_id="$1" tag_name="$2"
+  local tags_json tag_id
+
+  tags_json=$(api_get "tags/?page_size=10000")
+  tag_id=$(echo "$tags_json" | jq -r --arg n "$tag_name" \
+    '.results[] | select(.name == $n) | .id' | head -1)
+
+  [ -z "$tag_id" ] && { echo "Error: tag '${tag_name}' not found" >&2; exit 1; }
+
+  local current_tags new_tags
+  current_tags=$(api_get "documents/${doc_id}/" | jq '.tags')
+  new_tags=$(echo "$current_tags" | jq --argjson tid "$tag_id" '[.[] | select(. != $tid)]')
+
+  api_patch "documents/${doc_id}/" "{\"tags\": ${new_tags}}" >/dev/null
+  jq -n --arg doc "$doc_id" --arg tag "$tag_name" \
+    '{"success": true, "document_id": ($doc|tonumber), "tag_removed": $tag}'
+}
+
+# --- Usage ---
+
+usage() {
+  cat >&2 <<'EOF'
+Usage: paperless <command> [options]
+
+Commands:
+  search [-q QUERY] [-t TITLE] [-s SENDER] [--tag TAG] [--limit N] [--all]
+         Search documents. Options are combinable.
+
+  get <id>
+         Get full document details including OCR text content.
+
+  content <id>
+         Get raw OCR text of a document (plain text output).
+
+  download <id> [--output PATH] [--original]
+         Download document as PDF. Defaults to ./{title}.pdf
+
+  tags list
+         List all tags.
+
+  tags add <doc_id> <tag_name>
+         Add a tag to a document (creates the tag if it doesn't exist).
+
+  tags remove <doc_id> <tag_name>
+         Remove a tag from a document.
+
+Environment:
+  PAPERLESS_HOST   Base URL  (default: https://paperless.w22.io)
+  PAPERLESS_TOKEN  Auth token
+
+Examples:
+  paperless search -q "invoice" -s "Amazon" --limit 10
+  paperless search -t "bank statement" --all
+  paperless get 42
+  paperless content 42
+  paperless download 42 --output ~/Downloads/doc.pdf
+  paperless tags list
+  paperless tags add 42 "urgent"
+  paperless tags remove 42 "urgent"
+EOF
+}
+
+# --- Entry point ---
+
+main() {
+  [ $# -eq 0 ] && { usage; exit 1; }
+  local cmd="$1"; shift
+
+  case "$cmd" in
+    search)
+      cmd_search "$@"
+      ;;
+    get)
+      [ $# -ge 1 ] || { echo "Usage: paperless get <id>" >&2; exit 1; }
+      cmd_get "$1"
+      ;;
+    content)
+      [ $# -ge 1 ] || { echo "Usage: paperless content <id>" >&2; exit 1; }
+      cmd_content "$1"
+      ;;
+    download)
+      cmd_download "$@"
+      ;;
+    tags)
+      [ $# -ge 1 ] || { echo "Usage: paperless tags <list|add|remove>" >&2; exit 1; }
+      local subcmd="$1"; shift
+      case "$subcmd" in
+        list)
+          cmd_tags_list
+          ;;
+        add)
+          [ $# -ge 2 ] || { echo "Usage: paperless tags add <doc_id> <tag>" >&2; exit 1; }
+          cmd_tags_add "$1" "$2"
+          ;;
+        remove)
+          [ $# -ge 2 ] || { echo "Usage: paperless tags remove <doc_id> <tag>" >&2; exit 1; }
+          cmd_tags_remove "$1" "$2"
+          ;;
+        *)
+          echo "Unknown subcommand: $subcmd" >&2; exit 1
+          ;;
+      esac
+      ;;
+    help|--help|-h)
+      usage; exit 0
+      ;;
+    *)
+      echo "Unknown command: $cmd" >&2
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
