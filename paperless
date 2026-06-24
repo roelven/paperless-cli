@@ -277,8 +277,16 @@ usage() {
 Usage: paperless <command> [options]
 
 Commands:
-  search [-q QUERY] [-t TITLE] [-s SENDER] [--tag TAG] [--limit N] [--all]
-         Search documents. Options are combinable.
+  search [-q QUERY] [-t TITLE] [-s SENDER] [--tag TAG] [--type TYPE]
+         [--after YYYY-MM-DD] [--before YYYY-MM-DD] [--limit N] [--all]
+
+         -q  Full-text search via the search index (content + title).
+             Results ranked by relevance. Index may lag behind new uploads.
+         -t  Title substring match direct against the database. Always reliable.
+         -s  Correspondent name substring (database). Always reliable.
+         --tag, --type, --after, --before: all database-level filters.
+
+         Output: {count, truncated, results[]}. Stderr warning when truncated.
 
   get <id>
          Get full document details including OCR text content.
